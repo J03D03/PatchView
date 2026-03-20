@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 
 print_lock = Lock()
 NULL_OID = "0" * 40
+FULL_CLONE_THRESHOLD = 200  # repos with >= this many commits get a full clone
 
 # Prevent git from ever prompting for credentials (blocks password prompts).
 GIT_ENV = {
@@ -65,8 +66,8 @@ def collect_repos_and_commits(csv_paths):
 # Phase 1: blobless clone
 # ---------------------------------------------------------------------------
 
-def clone_repo(project_url, output_dir):
-    """Blobless clone a single repo. Returns (url, success, message)."""
+def clone_repo(project_url, output_dir, full_clone=False):
+    """Clone a single repo. Returns (url, success, message)."""
     dir_name = url_to_dir_name(project_url)
     dest = os.path.join(output_dir, dir_name)
 
@@ -77,16 +78,17 @@ def clone_repo(project_url, output_dir):
     if not clone_url.endswith(".git"):
         clone_url += ".git"
 
+    cmd = ["git", "clone", "--quiet", clone_url, dest]
+    if not full_clone:
+        cmd.insert(2, "--filter=blob:none")
+        cmd.insert(3, "--no-checkout")
+
     try:
         subprocess.run(
-            ["git", "clone", "--filter=blob:none", "--no-checkout", clone_url, dest],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            env=GIT_ENV,
+            cmd, check=True, capture_output=True, text=True, timeout=600, env=GIT_ENV,
         )
-        return (project_url, True, "cloned")
+        mode = "full" if full_clone else "blobless"
+        return (project_url, True, f"cloned ({mode})")
     except subprocess.CalledProcessError as e:
         return (project_url, False, e.stderr.strip())
     except subprocess.TimeoutExpired:
@@ -94,16 +96,21 @@ def clone_repo(project_url, output_dir):
 
 
 def run_clone_phase(repo_commits, output_dir, workers):
-    """Phase 1: blobless clone all repos in parallel."""
+    """Phase 1: clone all repos in parallel (full for heavy repos, blobless for rest)."""
     urls = sorted(repo_commits.keys())
     total = len(urls)
-    print(f"Phase 1: Cloning {total} repos (blobless) with {workers} workers\n")
+    n_full = sum(1 for u in urls if len(repo_commits[u]) >= FULL_CLONE_THRESHOLD)
+    print(f"Phase 1: Cloning {total} repos ({n_full} full, {total - n_full} blobless) with {workers} workers\n")
 
     success = 0
     failed_urls = []
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(clone_repo, url, output_dir): url for url in urls}
+        futures = {
+            pool.submit(clone_repo, url, output_dir,
+                        full_clone=len(repo_commits[url]) >= FULL_CLONE_THRESHOLD): url
+            for url in urls
+        }
         for i, future in enumerate(as_completed(futures), 1):
             url, ok, msg = future.result()
             with print_lock:
@@ -132,6 +139,14 @@ def prefetch_blobs(project_url, commit_hashes, output_dir):
 
     if not os.path.exists(repo_path):
         return (project_url, 0, "repo missing, skipped")
+
+    # skip repos that were fully cloned (all blobs already local)
+    result = subprocess.run(
+        ["git", "-C", repo_path, "config", "--get", "remote.origin.promisor"],
+        capture_output=True, text=True,
+    )
+    if result.stdout.strip() != "true":
+        return (project_url, 0, "full clone, skipped prefetch")
 
     hashes = list(commit_hashes)
     if not hashes:
