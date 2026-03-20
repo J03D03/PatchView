@@ -127,6 +127,7 @@ class TextDataset(Dataset):
                     print(e)
                     continue
 
+            os.makedirs(os.path.dirname(self.commit_path), exist_ok=True)
             with open(self.commit_path, "wb") as f:
                 pickle.dump(result, f)
 
@@ -329,6 +330,7 @@ class TextDataset(Dataset):
 
             pbar.set_description(f"Current Project: {commit['repo']}")
 
+        os.makedirs(os.path.dirname(self.final_cache_list), exist_ok=True)
         with open(self.final_cache_list, "wb") as f:
             torch.save(
                 {
@@ -637,6 +639,7 @@ class EventsDataset(Dataset):
         else:
             logger.warning(f"Creating from scratch - {self.current_path}")
             self.create_list_of_hashes(all_json)
+            os.makedirs(os.path.dirname(self.current_path), exist_ok=True)
             torch.save(
                 (
                     self.final_list_tensors,

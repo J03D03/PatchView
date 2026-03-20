@@ -1,9 +1,10 @@
-transformers
+transformers<4.38
 tensorboard
 datasets
 scikit-learn
 pandas
-wandb
+wandb<0.19
 matplotlib
 shap
-./git2json
+pydriller
+pyarrow<15

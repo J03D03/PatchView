@@ -9,7 +9,8 @@ import pandas as pd
 import random
 import pickle
 from data.misc import safe_mkdir
-from data.data_creation import gh_cve_dir, repo_metadata_filename
+gh_cve_dir = "gh_cve_proccessed"
+repo_metadata_filename = "repo_metadata.json"
 from data.misc import find_best_accuracy, find_best_f1, EnumAction, safe_mkdir
 from data.misc import Repository, add_metadata
 import sys

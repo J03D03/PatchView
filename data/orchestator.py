@@ -1,9 +1,11 @@
+import csv
 import json
 import os
 import random
 import subprocess
 import git
 import traceback
+from urllib.parse import urlparse
 from tqdm import tqdm
 import pathlib
 from pydriller import Repository
@@ -243,6 +245,58 @@ def get_orchestrator(commits_path, commits_db_path, cache_path=None,should_split
     else:
         return split_randomly(commits_path, repo_commits)
 
+
+
+def url_to_repo_name(project_url):
+    """Convert a project URL to a repo name (path portion after the domain).
+
+    Examples:
+        https://github.com/01org/opa-ff -> 01org/opa-ff
+        https://android.googlesource.com/platform/dalvik -> platform/dalvik
+    """
+    parsed = urlparse(project_url)
+    path = parsed.path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return path
+
+
+def _load_csv_split(csv_path, mall, hash_list):
+    """Read a single CSV split file and populate mall and hash_list."""
+    with open(csv_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            commit_id = row["commit_id"]
+            label = 1 if row["is_vfc"] == "True" else 0
+            repo = url_to_repo_name(row["project_url"])
+            mall[commit_id] = {"label": label, "repo": repo}
+            hash_list.append(commit_id)
+
+
+def get_orchestrator_from_csv(csv_train_path, csv_val_path, csv_test_path):
+    """Load pre-defined train/val/test splits from CSV files.
+
+    CSV format: project_url,commit_id,is_vfc,commit_timestamp_utc
+
+    Returns:
+        mall: dict mapping commit_hash -> {"label": int, "repo": str}
+        train_hashes: list of training commit hashes
+        val_hashes: list of validation commit hashes
+        test_hashes: list of test commit hashes
+    """
+    mall = {}
+    train_hashes = []
+    val_hashes = []
+    test_hashes = []
+
+    _load_csv_split(csv_train_path, mall, train_hashes)
+    _load_csv_split(csv_val_path, mall, val_hashes)
+    _load_csv_split(csv_test_path, mall, test_hashes)
+
+    print(f"Loaded CSV splits — train: {len(train_hashes)}, "
+          f"val: {len(val_hashes)}, test: {len(test_hashes)}")
+
+    return mall, train_hashes, val_hashes, test_hashes
 
 
 if __name__ == "__main__":

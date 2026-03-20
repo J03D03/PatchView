@@ -14,7 +14,6 @@ import shap
 
 
 from matplotlib import pyplot as plt
-from sklearn.model_selection import KFold
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -38,10 +37,9 @@ from transformers import (
     DistilBertTokenizer,
 )
 
-from data.orchestator import get_orchestrator
+from data.orchestator import get_orchestrator_from_csv
 from models.models import get_model
 from data.datasets_info import EventsDataset, MyConcatDataset, TextDataset
-from data.datasets_info import get_patchdb_repos
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -71,22 +69,10 @@ def parse_args():
 
     # Data Related arguments
 
-    parser.add_argument("--use_cached_orchestrator",
-                        action="store_true",
-                        help="predefined orchestration of train/val/test"
-    )
-    
-    parser.add_argument("--split_by_repos",
-                        action="store_true",
-                        help="orchestration of train/val/test is splitted by different repositories"
-    )
-
-    parser.add_argument(
-        "--dataset",
-        default="/storage/nitzan/dataset/",
-        type=str,
-        help="The output directory where the model predictions and checkpoints will be written.",
-    )
+    # CSV-based train/val/test splits
+    parser.add_argument("--csv_train", type=str, required=True, help="CSV file for training split")
+    parser.add_argument("--csv_val", type=str, required=True, help="CSV file for validation split")
+    parser.add_argument("--csv_test", type=str, required=True, help="CSV file for test split")
 
     parser.add_argument(
         "--output_dir",
@@ -137,7 +123,6 @@ def parse_args():
     )
 
     parser.add_argument("--filter_repos", type=str, default="")
-    parser.add_argument("--use_patchdb_commits", action='store_true', help="use only commits from patchdb")
 
     # Training parameters
     parser.add_argument("--hidden_size", type=int, default=768)
@@ -175,8 +160,6 @@ def parse_args():
         "--max_grad_norm", default=1.0, type=float, help="Max gradient norm."
     )
     parser.add_argument("--activation", default="tanh", type=str, help="activation")
-    parser.add_argument("--folds", type=int, default=10, help="folds")
-    parser.add_argument("--run_fold", type=int, default=-1, help="run_fold")
     parser.add_argument(
         "--balance_factor", type=float, default=1.0, help="balance_factor"
     )
@@ -695,14 +678,8 @@ def main(args):
     if args.cache_dir:
         args.model_cache_dir = os.path.join(args.cache_dir, "models")
 
-    if args.filter_repos != "" and args.use_patchdb_commits:
-        raise ValueError("Cannot use both filter_repos and use_patchdb_commits")
-
     if args.filter_repos != "":
         filter_repos = args.filter_repos.split(",")
-    
-    if args.use_patchdb_commits:
-        filter_repos = get_patchdb_repos()
 
     logger.warning("Training/evaluation parameters %s", args)
 
@@ -710,15 +687,9 @@ def main(args):
     args.message_activation = define_activation(args.message_activation)
     args.event_activation = define_activation(args.event_activation)
 
-    if args.use_cached_orchestrator:
-        with open(os.path.join(args.cache_dir, "orc", "orchestrator.json"), "r") as f:
-            mall = json.load(f)
-    else:
-        mall = get_orchestrator(
-            os.path.join(args.dataset, "commits"),
-            os.path.join(args.dataset, "repo_commits.json"),
-            cache_path=args.cache_dir,
-            split_by_repos=args.split_by_repos)
+    mall, train_hashes, val_hashes, test_hashes = get_orchestrator_from_csv(
+        args.csv_train, args.csv_val, args.csv_test
+    )
 
     code_tokenizer, message_tokenizer = None, None
 
@@ -756,59 +727,53 @@ def main(args):
     else:
         raise NotImplementedError
 
-    best_acc = 0
-    splits = KFold(n_splits=args.folds, shuffle=True, random_state=args.seed)
+    train_hash_arr = np.array(train_hashes)
+    val_hash_arr = np.array(val_hashes)
+    test_hash_arr = np.array(test_hashes)
 
-    best_accs = []
-    mall_keys_list = np.array(sorted(mall.keys()))
-    for fold, (train_idx, val_idx) in enumerate(
-        splits.split(np.arange(len(mall_keys_list)))
-    ):
-        if args.run_fold != -1 and args.run_fold != fold:
-            continue
+    dataset.set_hashes(train_hash_arr, is_train=True)
+    dataset.set_hashes(val_hash_arr, is_train=False)
 
-        logger.warning(f"Running Fold {fold}")
-        dataset.set_hashes(mall_keys_list[train_idx], is_train=True)
-        dataset.set_hashes(mall_keys_list[val_idx], is_train=False)
+    with wandb.init(
+        project=PROJECT_NAME, tags=[args.source_model], config=args
+    ) as run:
+        model = get_model(
+            args, message_tokenizer=message_tokenizer, code_tokenizer=code_tokenizer
+        )
+        run.define_metric("epoch")
 
-        with wandb.init(
-            project=PROJECT_NAME, tags=[args.source_model], config=args
-        ) as run:
-            model = get_model(
-                args, message_tokenizer=message_tokenizer, code_tokenizer=code_tokenizer
-            )
-            run.define_metric("epoch")
+        best_acc = train(
+            args, dataset, model, fold=0, idx=train_hash_arr, run=run,
+            eval_idx=val_hash_arr,
+        )
 
-            best_acc = train(
-                args, dataset, model, fold, train_idx, run, eval_idx=val_idx
-            )
-            best_accs.append(best_acc)
+        dataset.is_train = True
+        train_dataloader = DataLoader(
+            dataset,
+            batch_size=args.train_batch_size,
+            num_workers=0,
+            pin_memory=True,
+            drop_last=True,
+            shuffle=True,
+        )
+        batch = next(iter(train_dataloader))
+        if args.source_model == "Multi":
+            feature_importance_analysis(dataset, model, batch[0])
 
-            dataset.is_train = True
-            train_dataloader = DataLoader(
-                dataset,
-                batch_size=args.train_batch_size,
-                num_workers=0,
-                pin_memory=True,
-                drop_last=True,
-                shuffle=True,
-            )
-            batch = next(iter(train_dataloader))
-            if args.source_model == "Multi":
-                feature_importance_analysis(dataset, model, batch[0])
-            test(args, model, dataset, val_idx, fold=fold)
-            run.summary["best_acc"] = max(best_accs)
+        # Evaluate on the held-out test set
+        dataset.set_hashes(test_hash_arr, is_train=False)
+        test(args, model, dataset, test_hash_arr, fold=0)
+        run.summary["best_acc"] = best_acc
 
-            model_dir = os.path.join(args.output_dir, "checkpoint-best-acc")
-
-            output_dir = os.path.join(
-                model_dir, f"{args.source_model}_model_{fold}.bin"
-            )
-            artifact = wandb.Artifact(
-                f"{args.source_model}_model_{fold}.bin", type="model"
-            )
-            artifact.add_file(output_dir)
-            run.log_artifact(artifact)
+        model_dir = os.path.join(args.output_dir, "checkpoint-best-acc")
+        output_dir = os.path.join(
+            model_dir, f"{args.source_model}_model_0.bin"
+        )
+        artifact = wandb.Artifact(
+            f"{args.source_model}_model_0.bin", type="model"
+        )
+        artifact.add_file(output_dir)
+        run.log_artifact(artifact)
 
     return {}
 

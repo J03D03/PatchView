@@ -528,14 +528,20 @@ def generator(feat, labels):
     return
 
 
-try:
-    with open(r"C:\secrets\github_token.txt", "r") as f:
-        github_token = f.read()
-except FileNotFoundError:
-    with open(r"/storage/nitzan/code/github_token.txt", "r") as f:
-        github_token = f.read()
+import os
 
-headers = {"Authorization": "token " + github_token}
+_github_token_path = os.environ.get("GITHUB_TOKEN_FILE", "")
+github_token = ""
+for path in [_github_token_path, r"C:\secrets\github_token.txt", r"/storage/nitzan/code/github_token.txt"]:
+    if path:
+        try:
+            with open(path, "r") as f:
+                github_token = f.read().strip()
+            break
+        except FileNotFoundError:
+            continue
+
+headers = {"Authorization": "token " + github_token} if github_token else {}
 commits_between_dates = """
 {{
     repository(owner: "{0}", name:"{1}") {{

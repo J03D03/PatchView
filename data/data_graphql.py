@@ -18,13 +18,16 @@ class RepoNotFoundError(BaseException):
 OUTPUT_DIRNAME = "graphql"
 
 # copied from https://github.com/n0vad3v/get-profile-data-of-repo-stargazers-graphql
-try:
-    
-    token = pathlib.Path(r"C:\secrets\github_token.txt").read_text()
-except FileNotFoundError:
-    token = pathlib.Path("/storage/nitzan/code/github_token.txt").read_text()
+token = ""
+for path in [os.environ.get("GITHUB_TOKEN_FILE", ""), r"C:\secrets\github_token.txt", "/storage/nitzan/code/github_token.txt"]:
+    if path:
+        try:
+            token = pathlib.Path(path).read_text().strip()
+            break
+        except FileNotFoundError:
+            continue
 
-headers = {"Authorization": "token " + token.replace("\n","")}
+headers = {"Authorization": "token " + token} if token else {}
 
 generalQL = """
 {{

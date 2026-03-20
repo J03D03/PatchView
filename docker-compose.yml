@@ -1,0 +1,94 @@
+x-train-base: &train-base
+  build: .
+  devices:
+    - nvidia.com/gpu=all
+  volumes:
+    - ${REPOS_DIR:-./repos}:/data/commits
+    - ${CACHE_DIR:-./cache}:/data/cache
+    - ${OUTPUT_DIR:-./output}:/data/output
+    - ./datasets:/data/datasets
+  environment:
+    - WANDB_MODE=${WANDB_MODE:-disabled}
+    - WANDB_API_KEY=${WANDB_API_KEY:-}
+
+services:
+  # Step 1: Clone all repos referenced in the CSV dataset
+  prep:
+    build: .
+    volumes:
+      - ${REPOS_DIR:-./repos}:/data/commits
+      - ./datasets:/data/datasets
+    command: >
+      python scripts/clone_repos.py
+        --csv /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-train.csv
+        --csv /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-val.csv
+        --csv /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-test.csv
+        --output_dir /data/commits
+        --workers 16
+
+  # Step 2a: Train the Code model
+  train-code:
+    <<: *train-base
+    depends_on:
+      prep:
+        condition: service_completed_successfully
+    command: >
+      python main.py
+        --source_model Code
+        --csv_train /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-train.csv
+        --csv_val /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-val.csv
+        --csv_test /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-test.csv
+        --commit_repos_path /data/commits
+        --cache_dir /data/cache
+        --output_dir /data/output
+        --epochs 100
+        --batch_size 16
+        --learning_rate 1e-5
+        --dropout 0.5
+        --code_embedding_type simple
+        --recreate_cache
+
+  # Step 2b: Train the Message model (can run in parallel with train-code)
+  train-message:
+    <<: *train-base
+    depends_on:
+      prep:
+        condition: service_completed_successfully
+    command: >
+      python main.py
+        --source_model Message
+        --csv_train /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-train.csv
+        --csv_val /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-val.csv
+        --csv_test /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-test.csv
+        --commit_repos_path /data/commits
+        --cache_dir /data/cache
+        --output_dir /data/output
+        --epochs 100
+        --batch_size 16
+        --learning_rate 1e-5
+        --dropout 0.5
+        --recreate_cache
+
+  # Step 3: Train the Multi model (after sub-models are done)
+  train-multi:
+    <<: *train-base
+    depends_on:
+      train-code:
+        condition: service_completed_successfully
+      train-message:
+        condition: service_completed_successfully
+    command: >
+      python main.py
+        --source_model Multi_Without_Behavioural
+        --csv_train /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-train.csv
+        --csv_val /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-val.csv
+        --csv_test /data/datasets/dataset2-mr-advisory-cpp-groupstrat-seed17-test.csv
+        --commit_repos_path /data/commits
+        --cache_dir /data/cache
+        --output_dir /data/output
+        --code_merge_file
+        --epochs 100
+        --batch_size 16
+        --learning_rate 1e-5
+        --dropout 0.5
+        --recreate_cache
