@@ -572,9 +572,29 @@ def extract_commits_from_projects(output_dir):
         commit_cur_dir = os.path.join(output_dir, commit_directory, repo_directory)
         repo_url = f"https://github.com/{repo_name}.git"
 
-        subprocess.run(f"git clone --mirror {repo_url} {commit_cur_dir}", shell=True)
+        try:
+            subprocess.run(
+                ["git", "clone", "--mirror", repo_url, commit_cur_dir],
+                timeout=600,
+                check=True,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(f"Timed out cloning {repo_url}")
+            continue
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to clone {repo_url}: {e}")
+            continue
 
-        subprocess.run(f"git -C {commit_cur_dir} fetch --unshallow", shell=True)
+        try:
+            subprocess.run(
+                ["git", "-C", commit_cur_dir, "fetch", "--unshallow"],
+                timeout=300,
+                check=True,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(f"Timed out fetching --unshallow for {commit_cur_dir}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to fetch --unshallow for {commit_cur_dir}: {e}")
         commit_abs_path = os.path.abspath(commit_cur_dir)
         gitlog = run_git_log(commit_abs_path)
         jsons = git2jsons(gitlog)

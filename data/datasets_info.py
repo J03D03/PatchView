@@ -3,7 +3,7 @@
 # pylint: disable=logging-not-lazy
 
 from torch.utils.data import Dataset
-from tqdm import tqdm
+from data.misc import tqdm
 import torch
 import pandas as pd
 import pickle
@@ -402,7 +402,7 @@ class MyConcatDataset(torch.utils.data.Dataset):
 
         # ugly but easy
         labels_counter = [0, 0]
-        for commit_hash in tqdm(hash_list):
+        for commit_hash in tqdm(hash_list, desc="Merging hashes"):
             try:
                 labels = []
                 infos = []

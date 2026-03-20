@@ -15,7 +15,7 @@ import shap
 
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from data.misc import tqdm
 
 from transformers import (
     get_linear_schedule_with_warmup,
@@ -441,19 +441,19 @@ def train(args, train_dataset, model, fold, idx, run, eval_idx=None):
     if os.path.exists(optimizer_last):
         optimizer.load_state_dict(torch.load(optimizer_last))
     # Train!
-    logger.info("***** Running training *****")
-    logger.info("  Num GPUS = %d", args.n_gpu)
-    logger.info("  Num examples = %d , evaluation = %d", len(idx), len(eval_idx))
-    logger.info("  Num Epochs = %d", args.num_train_epochs)
-    logger.info(
+    logger.warning("***** Running training *****")
+    logger.warning("  Num GPUS = %d", args.n_gpu)
+    logger.warning("  Num examples = %d , evaluation = %d", len(idx), len(eval_idx))
+    logger.warning("  Num Epochs = %d", args.num_train_epochs)
+    logger.warning(
         "  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size
     )
-    logger.info(
+    logger.warning(
         "  Total train batch size (w. parallel, distributed & accumulation) = %d",
         args.train_batch_size * args.gradient_accumulation_steps,
     )
-    logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
-    logger.info("  Total optimization steps = %d", args.max_steps)
+    logger.warning("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
+    logger.warning("  Total optimization steps = %d", args.max_steps)
 
     run.summary[f"train_examples_{fold}"] = len(idx)
     run.summary[f"eval_examples_{fold}"] = len(eval_idx)
@@ -579,7 +579,7 @@ def test(args, model, dataset, idx, fold=0):
     model.eval()
     logits = []
     labels = []
-    for batch in tqdm(eval_dataloader, total=len(eval_dataloader)):
+    for batch in tqdm(eval_dataloader, total=len(eval_dataloader), desc="Testing"):
         inputs = []
         for x in batch[0]:
             if len(x) == 0:

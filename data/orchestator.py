@@ -6,7 +6,7 @@ import subprocess
 import git
 import traceback
 from urllib.parse import urlparse
-from tqdm import tqdm
+from data.misc import tqdm
 import pathlib
 from pydriller import Repository
 
@@ -23,10 +23,21 @@ TEST_RATE = 0
 
 def get_benign_commits(cur_repo_path,repo, security_commits):
     cur_repo = cur_repo_path + "/" + repo.replace("/", "_")
-    mall = subprocess.run(
-        ["git", "rev-list", "--all", "--since=2015"], stdout=subprocess.PIPE, cwd=cur_repo
-    )
-    mall = mall.stdout.decode("utf-8").split("\n")
+    try:
+        mall = subprocess.run(
+            ["git", "rev-list", "--all", "--since=2015"],
+            stdout=subprocess.PIPE,
+            cwd=cur_repo,
+            timeout=300,
+            check=True,
+        )
+        mall = mall.stdout.decode("utf-8").split("\n")
+    except subprocess.TimeoutExpired:
+        print(f"Timed out running git rev-list for {cur_repo}")
+        return
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to run git rev-list for {cur_repo}: {e}")
+        return
     random.shuffle(mall)
     for commit in mall:
         if commit in security_commits:
@@ -215,7 +226,7 @@ def split_by_repos(cur_repo_path, data):
         [training_dict, validation_dict, testing_dict],
         [training_keys, validation_keys, testing_keys],
     ):
-        for repo in tqdm(keys):
+        for repo in tqdm(keys, desc="Splitting by repos"):
             try:
                 dict[repo] = []
                 for commit in data[repo]:

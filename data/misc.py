@@ -1,6 +1,7 @@
 import contextlib
 from functools import wraps
 import random
+import sys
 from time import time
 import itertools
 import requests
@@ -19,6 +20,14 @@ from dateutil import parser
 from collections import Counter
 import numpy as np
 from enum import Enum
+from tqdm import tqdm as _tqdm
+
+
+def tqdm(iterable=None, *args, **kwargs):
+    """tqdm wrapper that reduces output noise in non-TTY environments (e.g. Docker)."""
+    if not sys.stderr.isatty():
+        kwargs.setdefault('mininterval', 30)
+    return _tqdm(iterable, *args, **kwargs)
 
 from torch.utils.data import Dataset
 
