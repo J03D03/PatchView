@@ -9,6 +9,6 @@ RUN pip install --no-cache-dir --timeout 120 --retries 3 -r requirements.txt
 
 COPY . .
 
-ARG UID=1000
-RUN useradd -u $UID -m appuser
+ARG APP_UID=1000
+RUN useradd -u $APP_UID -m appuser
 USER appuser

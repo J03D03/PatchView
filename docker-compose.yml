@@ -2,7 +2,7 @@ x-train-base: &train-base
   build:
     context: .
     args:
-      UID: ${UID:-1000}
+      APP_UID: ${APP_UID:-1000}
   devices:
     - nvidia.com/gpu=all
   volumes:
@@ -18,9 +18,9 @@ services:
   # Step 1: Clone all repos referenced in the CSV dataset
   prep:
     build:
-    context: .
-    args:
-      UID: ${UID:-1000}
+      context: .
+      args:
+        APP_UID: ${APP_UID:-1000}
     volumes:
       - ${REPOS_DIR:-./repos}:/data/commits
       - ./datasets:/data/datasets
