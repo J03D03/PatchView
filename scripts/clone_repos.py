@@ -1,9 +1,9 @@
 """Clone all repositories referenced in the CSV dataset files and pre-fetch
 only the blobs needed for the commits in the dataset.
 
-Two-phase approach:
-  Phase 1: Blobless clone (--filter=blob:none --no-checkout) — fast, parallel
-  Phase 2: Pre-fetch blobs for dataset commits via git cat-file --batch
+Two-phase approach (aligned with RepoSPD's data_loader.py):
+  Phase 1: Clone (full for heavy repos, blobless for the rest)
+  Phase 2: Pre-fetch blob OIDs for blobless repos via diff-tree + git fetch
 
 Usage:
     python scripts/clone_repos.py \
@@ -16,8 +16,12 @@ Usage:
 
 import argparse
 import csv
+import errno
 import os
+import shutil
 import subprocess
+import threading
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -26,14 +30,11 @@ from urllib.parse import urlparse
 
 print_lock = Lock()
 NULL_OID = "0" * 40
-FULL_CLONE_THRESHOLD = 200  # repos with >= this many commits get a full clone
+FULL_CLONE_THRESHOLD = 200
 
-# Prevent git from ever prompting for credentials (blocks password prompts).
 GIT_ENV = {
     **os.environ,
     "GIT_TERMINAL_PROMPT": "0",
-    "GIT_ASKPASS": "echo",
-    "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
 }
 
 
@@ -63,7 +64,7 @@ def collect_repos_and_commits(csv_paths):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: blobless clone
+# Phase 1: clone
 # ---------------------------------------------------------------------------
 
 def clone_repo(project_url, output_dir, full_clone=False):
@@ -71,8 +72,15 @@ def clone_repo(project_url, output_dir, full_clone=False):
     dir_name = url_to_dir_name(project_url)
     dest = os.path.join(output_dir, dir_name)
 
-    if os.path.exists(dest):
-        return (project_url, True, "skipped (exists)")
+    # skip if already cloned and valid
+    if os.path.isdir(dest):
+        if subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=dest, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0:
+            return (project_url, True, "skipped (exists)")
+        # broken repo from interrupted run — remove and re-clone
+        shutil.rmtree(dest)
 
     clone_url = project_url
     if not clone_url.endswith(".git"):
@@ -81,7 +89,6 @@ def clone_repo(project_url, output_dir, full_clone=False):
     cmd = ["git", "clone", "--quiet", clone_url, dest]
     if not full_clone:
         cmd.insert(2, "--filter=blob:none")
-        cmd.insert(3, "--no-checkout")
 
     try:
         subprocess.run(
@@ -96,11 +103,12 @@ def clone_repo(project_url, output_dir, full_clone=False):
 
 
 def run_clone_phase(repo_commits, output_dir, workers):
-    """Phase 1: clone all repos in parallel (full for heavy repos, blobless for rest)."""
+    """Phase 1: clone all repos in parallel."""
     urls = sorted(repo_commits.keys())
     total = len(urls)
     n_full = sum(1 for u in urls if len(repo_commits[u]) >= FULL_CLONE_THRESHOLD)
-    print(f"Phase 1: Cloning {total} repos ({n_full} full, {total - n_full} blobless) with {workers} workers\n")
+    print(f"Phase 1: Cloning {total} repos ({n_full} full, {total - n_full} blobless) "
+          f"with {workers} workers\n", flush=True)
 
     success = 0
     failed_urls = []
@@ -115,13 +123,13 @@ def run_clone_phase(repo_commits, output_dir, workers):
             url, ok, msg = future.result()
             with print_lock:
                 status = "OK" if ok else "FAIL"
-                print(f"  [{i}/{total}] {status}: {url_to_dir_name(url)} — {msg}")
+                print(f"  [{i}/{total}] {status}: {url_to_dir_name(url)} — {msg}", flush=True)
             if not ok:
                 failed_urls.append(url)
             else:
                 success += 1
 
-    print(f"\nPhase 1 done. Cloned: {success}, Failed: {len(failed_urls)}")
+    print(f"\nPhase 1 done. Cloned: {success}, Failed: {len(failed_urls)}", flush=True)
     return failed_urls
 
 
@@ -129,123 +137,124 @@ def run_clone_phase(repo_commits, output_dir, workers):
 # Phase 2: pre-fetch blobs for dataset commits
 # ---------------------------------------------------------------------------
 
-def prefetch_blobs(project_url, commit_hashes, output_dir):
-    """Enumerate blob OIDs via diff-tree, then batch-fetch via cat-file.
+def _fetch_oids(repo_path, oids, deadline=None):
+    """Fetch blob OIDs, recursively splitting on E2BIG."""
+    if not oids:
+        return
+    if deadline is None:
+        deadline = time.monotonic() + 1800
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin"] + oids,
+            cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=GIT_ENV, timeout=remaining,
+        )
+    except subprocess.TimeoutExpired:
+        repo = os.path.basename(repo_path)
+        print(f"  {repo}: fetch timed out ({len(oids)} oids), skipping", flush=True)
+    except OSError as e:
+        if e.errno == errno.E2BIG and len(oids) > 1:
+            mid = len(oids) // 2
+            _fetch_oids(repo_path, oids[:mid], deadline)
+            _fetch_oids(repo_path, oids[mid:], deadline)
+        else:
+            raise
 
-    Returns (url, num_blobs_fetched, message).
-    """
+
+def _prefetch_one(project_url, commit_hashes, output_dir, timeout=1200):
+    """Pre-fetch blobs for a single repo. Returns (url, num_blobs, message)."""
     dir_name = url_to_dir_name(project_url)
     repo_path = os.path.join(output_dir, dir_name)
 
     if not os.path.exists(repo_path):
         return (project_url, 0, "repo missing, skipped")
 
+    deadline = time.monotonic() + timeout
+
     # skip repos that were fully cloned (all blobs already local)
     result = subprocess.run(
-        ["git", "-C", repo_path, "config", "--get", "remote.origin.promisor"],
-        capture_output=True, text=True,
+        ["git", "config", "--get", "remote.origin.promisor"],
+        cwd=repo_path, capture_output=True, text=True,
     )
     if result.stdout.strip() != "true":
-        return (project_url, 0, "full clone, skipped prefetch")
+        return (project_url, 0, "full clone, skipped")
 
     hashes = list(commit_hashes)
     if not hashes:
         return (project_url, 0, "no commits")
 
-    # diff-tree --stdin: reads commit hashes, outputs changed blob OIDs
-    # Trees are local (fetched during blobless clone), so this is fast.
+    # Stream diff-tree output to collect blob OIDs without buffering
+    proc = None
     try:
-        input_data = "\n".join(hashes) + "\n"
-        result = subprocess.run(
-            ["git", "-C", repo_path, "diff-tree", "-r", "--stdin", "--no-commit-id"],
-            input=input_data,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=GIT_ENV,
-        )
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-        return (project_url, 0, f"diff-tree failed: {e}")
-
-    blob_oids = set()
-    for line in result.stdout.splitlines():
-        if not line.startswith(":"):
-            continue
-        parts = line.split("\t")[0].split()
-        if len(parts) >= 5:
-            old_oid, new_oid = parts[2], parts[3]
-            if old_oid != NULL_OID:
-                blob_oids.add(old_oid)
-            if new_oid != NULL_OID:
-                blob_oids.add(new_oid)
-
-    if not blob_oids:
-        return (project_url, 0, "no blobs needed")
-
-    # Bulk-fetch missing blobs via `git fetch origin` with explicit OIDs.
-    # This does a single pack negotiation instead of cat-file's serial
-    # one-object-at-a-time lazy fetching, which is much faster and avoids
-    # timeouts on large repos.
-    try:
-        oid_list = list(blob_oids)
-        BATCH = 500
-        for start in range(0, len(oid_list), BATCH):
-            batch = oid_list[start : start + BATCH]
-            subprocess.run(
-                ["git", "-C", repo_path, "fetch", "origin", *batch],
-                capture_output=True,
-                timeout=300,
-                env=GIT_ENV,
-            )
-    except subprocess.TimeoutExpired:
-        return (project_url, 0, "fetch timed out")
-    except subprocess.CalledProcessError as e:
-        # Fallback: try cat-file for whatever remains unfetched
-        pass
-
-    # Verify objects are present; count how many we actually have.
-    try:
-        oid_input = "\n".join(blob_oids) + "\n"
         proc = subprocess.Popen(
-            ["git", "-C", repo_path, "cat-file", "--batch-check"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=GIT_ENV,
+            ["git", "diff-tree", "-r", "-m", "--stdin", "--no-commit-id"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            cwd=repo_path, text=True,
         )
-        stdout, _ = proc.communicate(input=oid_input.encode(), timeout=60)
-        fetched = sum(1 for line in stdout.decode().splitlines() if "missing" not in line)
-    except (subprocess.TimeoutExpired, OSError):
-        if proc.poll() is None:
-            proc.kill()
-        fetched = len(blob_oids)  # assume success if verify fails
 
-    return (project_url, fetched, f"fetched {fetched} blobs")
+        def _write_stdin():
+            try:
+                proc.stdin.write("\n".join(hashes))
+            except OSError:
+                pass
+            finally:
+                proc.stdin.close()
+
+        writer = threading.Thread(target=_write_stdin, daemon=True)
+        writer.start()
+
+        oids = set()
+        for line in proc.stdout:
+            if time.monotonic() > deadline:
+                break
+            if not line.startswith(":"):
+                continue
+            parts = line.split()
+            if len(parts) >= 5:
+                for oid in (parts[2], parts[3]):
+                    if oid != NULL_OID:
+                        oids.add(oid)
+
+        if not oids:
+            return (project_url, 0, "no blobs needed")
+
+        _fetch_oids(repo_path, list(oids), deadline)
+        return (project_url, len(oids), f"fetched {len(oids)} blobs")
+
+    except (subprocess.TimeoutExpired, TimeoutError):
+        return (project_url, 0, "timed out")
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait()
 
 
 def run_prefetch_phase(repo_commits, output_dir, workers):
     """Phase 2: pre-fetch blobs for dataset commits in parallel."""
     repos = sorted(repo_commits.keys())
     total = len(repos)
-    print(f"\nPhase 2: Pre-fetching blobs for {total} repos with {workers} workers\n")
+    print(f"\nPhase 2: Pre-fetching blobs for {total} repos with {workers} workers\n", flush=True)
 
     total_blobs = 0
     failed = []
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(prefetch_blobs, url, repo_commits[url], output_dir): url
+            pool.submit(_prefetch_one, url, repo_commits[url], output_dir): url
             for url in repos
         }
         for i, future in enumerate(as_completed(futures), 1):
             url, num_blobs, msg = future.result()
             total_blobs += num_blobs
             with print_lock:
-                print(f"  [{i}/{total}] {url_to_dir_name(url)} — {msg}")
-            if num_blobs == 0 and "fetched" not in msg and "no " not in msg:
+                print(f"  [{i}/{total}] {url_to_dir_name(url)} — {msg}", flush=True)
+            if num_blobs == 0 and "skipped" not in msg and "no " not in msg:
                 failed.append(url)
 
-    print(f"\nPhase 2 done. Total blobs fetched: {total_blobs}")
+    print(f"\nPhase 2 done. Total blobs fetched: {total_blobs}", flush=True)
     return failed
 
 
@@ -277,7 +286,7 @@ def main():
     total_commits = sum(len(v) for v in repo_commits.values())
     print(f"Found {len(repo_commits)} repos, {total_commits} commits total.\n")
 
-    # Phase 1: blobless clone
+    # Phase 1: clone
     clone_failures = run_clone_phase(repo_commits, args.output_dir, args.workers)
 
     # Phase 2: pre-fetch only the blobs we need
