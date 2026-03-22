@@ -92,14 +92,14 @@ def clone_repo(project_url, output_dir, full_clone=False):
 
     try:
         subprocess.run(
-            cmd, check=True, capture_output=True, text=True, timeout=600, env=GIT_ENV,
+            cmd, check=True, capture_output=True, text=True, timeout=3600, env=GIT_ENV,
         )
         mode = "full" if full_clone else "blobless"
         return (project_url, True, f"cloned ({mode})")
     except subprocess.CalledProcessError as e:
         return (project_url, False, e.stderr.strip())
     except subprocess.TimeoutExpired:
-        return (project_url, False, "timed out after 600s")
+        return (project_url, False, "timed out after 3600s")
 
 
 def run_clone_phase(repo_commits, output_dir, workers):
@@ -164,7 +164,7 @@ def _fetch_oids(repo_path, oids, deadline=None):
             raise
 
 
-def _prefetch_one(project_url, commit_hashes, output_dir, timeout=1200):
+def _prefetch_one(project_url, commit_hashes, output_dir, timeout=3600):
     """Pre-fetch blobs for a single repo. Returns (url, num_blobs, message)."""
     dir_name = url_to_dir_name(project_url)
     repo_path = os.path.join(output_dir, dir_name)
