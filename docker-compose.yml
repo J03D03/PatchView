@@ -3,6 +3,10 @@ x-train-base: &train-base
     context: .
     args:
       APP_UID: ${APP_UID:-1000}
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
   devices:
     - nvidia.com/gpu=all
   volumes:
