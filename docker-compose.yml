@@ -11,6 +11,7 @@ x-train-base: &train-base
     - ${OUTPUT_DIR:-./output}:/data/output
     - ./datasets:/data/datasets
   environment:
+    - PYTHONUNBUFFERED=1
     - WANDB_MODE=${WANDB_MODE:-disabled}
     - WANDB_API_KEY=${WANDB_API_KEY:-}
 
