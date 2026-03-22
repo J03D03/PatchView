@@ -7,14 +7,14 @@ x-train-base: &train-base
     nofile:
       soft: 65536
       hard: 65536
-  devices:
-    - nvidia.com/gpu=all
+  runtime: nvidia
   volumes:
     - ${REPOS_DIR:-./repos}:/data/commits
     - ${CACHE_DIR:-./cache}:/data/cache
     - ${OUTPUT_DIR:-./output}:/data/output
     - ./datasets:/data/datasets
   environment:
+    - NVIDIA_VISIBLE_DEVICES=${CUDA_DEVICE:-all}
     - PYTHONUNBUFFERED=1
     - WANDB_MODE=${WANDB_MODE:-disabled}
     - WANDB_API_KEY=${WANDB_API_KEY:-}
