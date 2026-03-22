@@ -95,44 +95,71 @@ class TextDataset(Dataset):
 
     def get_commits(self):
         """Get commits from repos or from cache"""
-        result = []
-        positives = 0
-        negatives = 0
         if os.path.exists(self.commit_path):
             logger.warning("Get Commits from cache")
             with open(self.commit_path, "rb") as f:
                 return pickle.load(f)
-        else:
-            logger.warning("Get Commits from repos")
-            for commit in (pbar := tqdm(list(self.keys)[:], leave=False)):
+
+        logger.warning("Get Commits from repos")
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from collections import defaultdict
+
+        # Group commits by repo to avoid git lock contention
+        repo_commits = defaultdict(list)
+        for k in self.keys:
+            if k == "":
+                continue
+            repo = self.all_json[k]["repo"]
+            label = self.all_json[k]["label"]
+            repo_commits[repo.replace("/", "_")].append((k, repo, label))
+
+        total_commits = sum(len(c) for c in repo_commits.values())
+        import threading
+        _progress_lock = threading.Lock()
+        _done = 0
+
+        def _process_repo(repo_name, commits):
+            nonlocal _done
+            results = []
+            for commit_hash, repo, label in commits:
                 try:
-                    if commit == "":
-                        assert False, "shouldnt be empty hashes here"
-                        continue
+                    results.append((self.prepare_dict(repo_name, label, commit_hash), label))
+                except Exception:
+                    pass
+                with _progress_lock:
+                    _done += 1
+                    if _done % 500 == 0 or _done == total_commits:
+                        logger.warning(f"Progress: {_done}/{total_commits} commits ({100*_done/total_commits:.1f}%)")
+            return results
 
-                    repo = self.all_json[commit]["repo"]
-                    label = self.all_json[commit]["label"]
-                    result.append(
-                        self.prepare_dict(repo.replace("/", "_"), label, commit)
-                    )
-                    if label == 1:
-                        positives += 1
-                    else:
-                        negatives += 1
+        result = []
+        positives = 0
+        negatives = 0
+        workers = min(8, os.cpu_count() or 4)
+        logger.warning(f"Using {workers} workers across {len(repo_commits)} repos ({total_commits} commits)")
 
-                    pbar.set_description(
-                        f"Repo - {repo} - Positives: {positives}, Negatives: {negatives}"
-                    )
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_process_repo, repo_name, commits): repo_name
+                for repo_name, commits in repo_commits.items()
+            }
+            for future in as_completed(futures):
+                try:
+                    for commit_dict, label in future.result():
+                        result.append(commit_dict)
+                        if label == 1:
+                            positives += 1
+                        else:
+                            negatives += 1
                 except Exception as e:
                     print(e)
-                    continue
 
-            os.makedirs(os.path.dirname(self.commit_path), exist_ok=True)
-            with open(self.commit_path, "wb") as f:
-                pickle.dump(result, f)
+        os.makedirs(os.path.dirname(self.commit_path), exist_ok=True)
+        with open(self.commit_path, "wb") as f:
+            pickle.dump(result, f)
 
-            logger.warning(f"Positives: {positives}, Negatives: {negatives}")
-            return result
+        logger.warning(f"Positives: {positives}, Negatives: {negatives}")
+        return result
 
     def add_code_data_to_dict(self, file):
         cur_dict = {}
@@ -182,8 +209,7 @@ class TextDataset(Dataset):
                 cur_dict = self.add_code_data_to_dict(file)
                 if cur_dict is not None:
                     final_dict["files"].append(cur_dict)
-        except Exception as e:
-            print(e)
+        except Exception:
             final_dict["files"] = []
             return final_dict
         return final_dict
