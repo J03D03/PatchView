@@ -135,7 +135,7 @@ class TextDataset(Dataset):
         result = []
         positives = 0
         negatives = 0
-        workers = min(8, os.cpu_count() or 4)
+        workers = min(self.args.commit_workers, os.cpu_count() or 4)
         logger.warning(f"Using {workers} workers across {len(repo_commits)} repos ({total_commits} commits)")
 
         with ThreadPoolExecutor(max_workers=workers) as executor:

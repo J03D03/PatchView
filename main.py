@@ -167,6 +167,12 @@ def parse_args():
         "--early_stop_threshold", type=int, default=20, help="early_stop_threshold"
     )
 
+    # Worker/thread counts
+    parser.add_argument(
+        "--commit_workers", type=int, default=48,
+        help="Number of threads for fetching commits from repos (get_commits step)",
+    )
+
     # Source related arguments
     parser.add_argument(
         "--source_model", type=str, default="Multi", help="source model"
